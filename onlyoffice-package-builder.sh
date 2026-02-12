@@ -34,13 +34,16 @@ cat <<EOF
   Example: $0 --product-version=7.4.1 --build-number=36 --unlimited-organization=btactic-oo --tag-suffix=-btactic --debian-package-suffix=-btactic --deb-only
 
 EOF
-
 }
 
 BINARIES_ONLY="false"
 DEB_ONLY="false"
 
 UPSTREAM_ORGANIZATION="ONLYOFFICE"
+
+# Use patched build_tools instead of upstream tag (fixes Qt prebuilt URL)
+BUILD_TOOLS_ORG="leadity-GmbH"
+BUILD_TOOLS_REF="v9.1.0.173-patched"
 
 SERVER_CUSTOM_COMMITS="35fda010a253c42344c08857424aa50c48f7eb8a"
 WEB_APPS_CUSTOM_COMMITS="140ef6d1d687532dcb03b05912838b8b4cf161a3"
@@ -141,7 +144,7 @@ fi
 
 PRUNE_DOCKER_CONTAINERS_ACTION="false"
 if [ "x${PRUNE_DOCKER_CONTAINERS}" != "x" ] ; then
-  if [ ${PRUNE_DOCKER_CONTAINERS} == "true" ] -o [ ${PRUNE_DOCKER_CONTAINERS} == "TRUE" ] ; then
+  if [ ${PRUNE_DOCKER_CONTAINERS} == "true" -o ${PRUNE_DOCKER_CONTAINERS} == "TRUE" ] ; then
     PRUNE_DOCKER_CONTAINERS_ACTION="true"
     cat << EOF
     WARNING !
@@ -194,7 +197,6 @@ prepare_custom_repo() {
   git tag -a "${_TAG}" -m "${_TAG}"
 
   cd ..
-
 }
 
 build_oo_binaries() {
@@ -214,18 +216,26 @@ build_oo_binaries() {
   git clone \
     --depth=1 \
     --recursive \
-    --branch ${_UPSTREAM_TAG} \
-    https://github.com/${UPSTREAM_ORGANIZATION}/build_tools.git \
+    --branch ${BUILD_TOOLS_REF} \
+    https://github.com/${BUILD_TOOLS_ORG}/build_tools.git \
     build_tools
-  # Ignore detached head warning
+
   cd build_tools
   mkdir ${_OUT_FOLDER}
   docker build --tag onlyoffice-document-editors-builder .
-  docker run -e PRODUCT_VERSION=${_PRODUCT_VERSION} -e BUILD_NUMBER=${_BUILD_NUMBER} -e NODE_ENV='production' -v $(pwd)/${_OUT_FOLDER}:/build_tools/out -v $(pwd)/../server:/server -v $(pwd)/../web-apps:/web-apps onlyoffice-document-editors-builder /bin/bash -c '\
-    cd tools/linux && \
-    python3 ./automate.py --branch=tags/'"${_UPSTREAM_TAG}"
-  cd ..
 
+  docker run \
+    -e PRODUCT_VERSION=${_PRODUCT_VERSION} \
+    -e BUILD_NUMBER=${_BUILD_NUMBER} \
+    -e NODE_ENV='production' \
+    -v $(pwd)/${_OUT_FOLDER}:/build_tools/out \
+    -v $(pwd)/../server:/server \
+    -v $(pwd)/../web-apps:/web-apps \
+    onlyoffice-document-editors-builder /bin/bash -c '\
+      cd tools/linux && \
+      python3 ./automate.py --branch='"${_UPSTREAM_TAG}"
+
+  cd ..
 }
 
 if [ "${BUILD_BINARIES}" == "true" ] ; then
