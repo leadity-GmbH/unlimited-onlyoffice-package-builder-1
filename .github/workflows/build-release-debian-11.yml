@@ -13,152 +13,146 @@ env:
 
 jobs:
   onlyoffice-release:
-    strategy:
-      matrix:
-        TARGET_DISTRO: [ "debian-11" ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Free Space - Cleanup
+      - name: Free Space
         run: |
           sudo swapoff -a
           sudo rm -f /swapfile
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf "$ANDROID_SDK_ROOT"
-          sudo rm -rf /usr/local/lib/android
           sudo docker system prune -af
           df -h
       
-      - name: Check out the repo
+      - name: Check out builder repo
         uses: actions/checkout@v4
+        with:
+          path: builder
       
       - name: Split branch name
         id: split-tag
+        working-directory: builder
         run: echo "version=${GITHUB_REF_NAME##*/}" >> $GITHUB_OUTPUT
       
       - name: Get Product version
         id: get-product-version
+        working-directory: builder
         run: echo "product-version=${VERSION%.*}" >> $GITHUB_OUTPUT
         env:
           VERSION: ${{ steps.split-tag.outputs.version }}
       
       - name: Get Build number
         id: get-build-number
+        working-directory: builder
         run: echo "build-number=${VERSION##$PRODUCT_VERSION.}" >> $GITHUB_OUTPUT
         env:
           VERSION: ${{ steps.split-tag.outputs.version }}
           PRODUCT_VERSION: ${{ steps.get-product-version.outputs.product-version }}
       
-      - name: Patch builder to use custom build_tools
-        run: |
-          # Modify the script to use your custom build_tools
-          sed -i 's|https://github.com/btactic-oo/build_tools.git|https://github.com/leadity-GmbH/build_tools.git|g' onlyoffice-package-builder.sh
-          
-          # Also modify to use a specific branch/tag
-          sed -i 's|git clone --depth 1 https://github.com/leadity-GmbH/build_tools.git|git clone --branch v9.1.0.173-leadity-working --depth 1 https://github.com/leadity-GmbH/build_tools.git|g' onlyoffice-package-builder.sh
-          
-          echo "=== Modified script ==="
-          grep -n "build_tools" onlyoffice-package-builder.sh || true
+      - name: Check out custom build_tools
+        uses: actions/checkout@v4
+        with:
+          repository: leadity-GmbH/build_tools
+          ref: v9.1.0.173-leadity-working
+          path: build_tools
+          token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Debug - Run binaries build with verbose output
-        id: docker-build-binaries-debug
-        run: |
-          # Run the build with output captured
-          sudo ./onlyoffice-package-builder.sh \
-            --product-version=${{ steps.get-product-version.outputs.product-version }} \
-            --build-number=${{ steps.get-build-number.outputs.build-number }} \
-            --unlimited-organization=${{ github.repository_owner }} \
-            --tag-suffix=${{ env.TAG_SUFFIX }} \
-            --debian-package-suffix=${{ env.DEBIAN_PACKAGE_SUFFIX }} \
-            --binaries-only > build_output.log 2>&1 || true
-          
-          echo "=== BUILD OUTPUT ==="
-          cat build_output.log
-          
-          echo "=== CHECKING FOR ERRORS ==="
-          grep -i "error\|fail\|cannot\|not found" build_output.log || echo "No obvious errors found"
+      - name: Check out server repo
+        uses: actions/checkout@v4
+        with:
+          repository: leadity-GmbH/server
+          ref: v9.1.0.173-leadity
+          path: server
+          token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Debug - Check Docker containers after build
+      - name: Check out web-apps repo
+        uses: actions/checkout@v4
+        with:
+          repository: leadity-GmbH/web-apps
+          ref: v9.1.0.173-leadity
+          path: web-apps
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            libssl-dev \
+            libcurl4-openssl-dev \
+            wget \
+            unzip \
+            pkg-config \
+            qt5-qmake \
+            qtbase5-dev \
+            libqt5svg5-dev \
+            libqt5websockets5-dev \
+            qttools5-dev-tools \
+            libboost-all-dev
+      
+      - name: Run build_tools directly
+        working-directory: build_tools/tools/linux
+        run: |
+          # Make sure we have the right paths
+          export PYTHONPATH=$PYTHONPATH:$(pwd)/../..
+          
+          # Try to build just the server
+          python3 automate.py server --branch v9.1.0.173-leadity --repo-url-server https://github.com/leadity-GmbH/server.git --repo-url-web-apps https://github.com/leadity-GmbH/web-apps.git 2>&1 | tee build.log
+          
+          echo "=== BUILD EXIT CODE: $? ==="
+      
+      - name: Check build output
         if: always()
+        working-directory: build_tools
         run: |
-          echo "=== DOCKER CONTAINERS ==="
-          sudo docker ps -a
+          echo "=== Build log ==="
+          cat tools/linux/build.log || true
           
-          echo "=== DOCKER IMAGES ==="
-          sudo docker images
+          echo "=== Checking for out directory ==="
+          find . -name "out" -type d
           
-          # Find the most recent container
-          CONTAINER_ID=$(sudo docker ps -a --format "{{.ID}}" | head -1)
-          if [ ! -z "$CONTAINER_ID" ]; then
-            echo "=== CONTAINER LOGS ==="
-            sudo docker logs $CONTAINER_ID 2>&1 | tail -50
-          fi
+          echo "=== Checking for documentserver ==="
+          find . -path "*/onlyoffice/documentserver" -type d
+          
+          echo "=== Listing out/linux_64 ==="
+          ls -la out/linux_64/ 2>/dev/null || echo "No out/linux_64"
+          
+          echo "=== Listing out/linux_64/onlyoffice ==="
+          ls -la out/linux_64/onlyoffice/ 2>/dev/null || echo "No onlyoffice directory"
       
-      - name: Debug - Check filesystem after build
-        if: always()
-        run: |
-          echo "=== CHECKING FOR BUILD_TOOLS OUTPUT ==="
-          find "${{ github.workspace }}" -type d -path "*/out/linux_64/onlyoffice/documentserver" 2>/dev/null || echo "No documentserver output found"
-          
-          echo "=== LISTING ALL out DIRECTORIES ==="
-          find "${{ github.workspace }}" -name "out" -type d 2>/dev/null | head -20
-          
-          echo "=== CHECKING build_tools DIRECTORY ==="
-          if [ -d "build_tools" ]; then
-            ls -la build_tools/
-            echo "=== build_tools/out contents ==="
-            ls -la build_tools/out/ 2>/dev/null || echo "build_tools/out not found"
-            echo "=== build_tools/out/linux_64 contents ==="
-            ls -la build_tools/out/linux_64/ 2>/dev/null || echo "build_tools/out/linux_64 not found"
-          else
-            echo "build_tools directory not found!"
-          fi
-      
-      - name: Debug - Check document-server-package
-        if: always()
-        run: |
-          echo "=== CHECKING document-server-package ==="
-          find "${{ github.workspace }}" -name "document-server-package" -type d 2>/dev/null | head -5
-          
-          if [ -d "deb_build/document-server-package" ]; then
-            echo "=== deb_build/document-server-package contents ==="
-            ls -la deb_build/document-server-package/
-            echo "=== Looking for DEB files ==="
-            find deb_build -name "*.deb" 2>/dev/null | head -10
-          fi
-      
-      - name: Docker build deb package
+      - name: Build DEB package
         if: success()
+        working-directory: builder/deb_build
         run: |
-          sudo ./onlyoffice-package-builder.sh \
-            --product-version=${{ steps.get-product-version.outputs.product-version }} \
-            --build-number=${{ steps.get-build-number.outputs.build-number }} \
-            --unlimited-organization=${{ github.repository_owner }} \
-            --tag-suffix=${{ env.TAG_SUFFIX }} \
-            --debian-package-suffix=${{ env.DEBIAN_PACKAGE_SUFFIX }} \
-            --deb-only
+          # Copy the built files to where the DEB builder expects them
+          mkdir -p document-server-package/common/documentserver/home
+          cp -rf ../build_tools/out/linux_64/onlyoffice/documentserver/* document-server-package/common/documentserver/home/ || true
+          
+          # Run the DEB build script
+          cd document-server-package
+          ./make-deb.sh --version ${{ steps.get-product-version.outputs.product-version }} --release ${{ steps.get-build-number.outputs.build-number }}${{ env.DEBIAN_PACKAGE_SUFFIX }}
       
-      - name: Find and release DEB package
+      - name: Find DEB package
         id: deb-release
+        working-directory: builder
         run: |
-          # Find the DEB file
           RELEASE_DEB=$(find "${{ github.workspace }}" -name "onlyoffice-documentserver_${{ steps.get-product-version.outputs.product-version }}-${{ steps.get-build-number.outputs.build-number }}${{ env.DEBIAN_PACKAGE_SUFFIX }}_amd64.deb" -type f | head -1)
           
           if [ -z "$RELEASE_DEB" ]; then
-            echo "❌ DEB package not found! Build failed."
-            # List all DEB files as fallback
-            echo "=== All DEB files found ==="
-            find "${{ github.workspace }}" -name "*.deb" -type f | head -20
+            echo "❌ DEB package not found!"
+            find "${{ github.workspace }}" -name "*.deb" -type f
             exit 1
           fi
           
-          RELEASE_SHORT_DEB=$(basename "$RELEASE_DEB")
           echo "filename=${RELEASE_DEB}" >> $GITHUB_OUTPUT
-          echo "shortfilename=${RELEASE_SHORT_DEB}" >> $GITHUB_OUTPUT
-          echo "✅ Found DEB: ${RELEASE_SHORT_DEB}"
+          echo "shortfilename=$(basename ${RELEASE_DEB})" >> $GITHUB_OUTPUT
       
       - name: Release
         uses: crowbarmaster/GH-Automatic-Releases@v1.6.0
