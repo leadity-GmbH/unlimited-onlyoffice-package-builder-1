@@ -10,6 +10,9 @@ env:
   TAG_SUFFIX: -leadity
   DISTRO_FULLNAME: Debian 11
   DISTRO_TAG_PREFIX: debian-11
+  # Add your custom build_tools repository and tag
+  BUILD_TOOLS_REPO: leadity-GmbH/build_tools
+  BUILD_TOOLS_TAG: v9.1.0.173-leadity-working
 
 jobs:
   onlyoffice-release:
@@ -64,43 +67,75 @@ jobs:
           df -h
       - name: Check out the repo
         uses: actions/checkout@v4
+        with:
+          path: main-repo
+      
+      - name: Check out custom build_tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BUILD_TOOLS_REPO }}
+          ref: ${{ env.BUILD_TOOLS_TAG }}
+          path: build_tools
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
       - name: Split branch name
         env:
           BRANCH: ${{ github.ref_name }}
         id: split-tag
+        working-directory: main-repo
         run: echo "version=${BRANCH##*/}" >> $GITHUB_OUTPUT
+      
       - name: Get Product version
         env:
           VERSION: ${{ steps.split-tag.outputs.version }}
         id: get-product-version
+        working-directory: main-repo
         run: echo "product-version=${VERSION%.*}" >> $GITHUB_OUTPUT
+      
       - name: Get Build number
         env:
           VERSION: ${{ steps.split-tag.outputs.version }}
           PRODUCT_VERSION: ${{ steps.get-product-version.outputs.product-version }}
         id: get-build-number
+        working-directory: main-repo
         run: echo "build-number=${VERSION##$PRODUCT_VERSION.}" >> $GITHUB_OUTPUT
+      
+      - name: Prepare build environment
+        run: |
+          # Copy custom build_tools to where the script expects it
+          mkdir -p main-repo/build_tools
+          cp -r build_tools/* main-repo/build_tools/
+          cd main-repo
+      
       - name: Docker build binaries
         id: docker-build-binaries
+        working-directory: main-repo
         run: |
           sudo ./onlyoffice-package-builder.sh --product-version=${{ steps.get-product-version.outputs.product-version }} --build-number=${{ steps.get-build-number.outputs.build-number }} --unlimited-organization=${{ github.repository_owner }} --tag-suffix=${{ env.TAG_SUFFIX }} --debian-package-suffix=${{ env.DEBIAN_PACKAGE_SUFFIX }} --binaries-only
+      
       - name: Docker prune all containers
         id: docker-prune-all-containers
+        working-directory: main-repo
         run: |
           sudo docker ps -a
           sudo docker container prune -f
           sudo docker ps -a
+      
       - name: Docker build deb package
         id: docker-build-deb
+        working-directory: main-repo
         run: |
           sudo ./onlyoffice-package-builder.sh --product-version=${{ steps.get-product-version.outputs.product-version }} --build-number=${{ steps.get-build-number.outputs.build-number }} --unlimited-organization=${{ github.repository_owner }} --tag-suffix=${{ env.TAG_SUFFIX }} --debian-package-suffix=${{ env.DEBIAN_PACKAGE_SUFFIX }} --deb-only
+      
       - name: Get tgz release filename
         id: deb-release
+        working-directory: main-repo
         run: |
-          RELEASE_DEB=$(find "${{ github.workspace }}" -name "onlyoffice-documentserver_${{ steps.get-product-version.outputs.product-version }}-${{ steps.get-build-number.outputs.build-number }}${{ env.DEBIAN_PACKAGE_SUFFIX }}_amd64.deb" -type f)
+          RELEASE_DEB=$(find "${{ github.workspace }}/main-repo" -name "onlyoffice-documentserver_${{ steps.get-product-version.outputs.product-version }}-${{ steps.get-build-number.outputs.build-number }}${{ env.DEBIAN_PACKAGE_SUFFIX }}_amd64.deb" -type f)
           RELEASE_SHORT_DEB=$(basename ${RELEASE_DEB})
           echo "filename=${RELEASE_DEB}" >> $GITHUB_OUTPUT
           echo "shortfilename=${RELEASE_SHORT_DEB}" >> $GITHUB_OUTPUT
+      
       - name: Release
         uses: crowbarmaster/GH-Automatic-Releases@v1.6.0
         with:
@@ -116,4 +151,4 @@ jobs:
             apt install /path/to/${{ steps.deb-release.outputs.shortfilename }}
             ```
           files: |
-            ${{ steps.deb-release.outputs.filename }}
+            ${{ steps.deb-release.outputs.shortfilename }}
